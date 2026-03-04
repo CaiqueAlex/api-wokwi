@@ -1,0 +1,93 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <WiFiClientSecure.h>
+
+// Configurações WiFi
+const char* ssid = "Wokwi-GUEST";
+const char* password = "";
+
+// URL da sua API no Codespace
+const char* serverUrl = "https://sturdy-lamp-4j7rp5qqgr7p3jw9x-8000.app.github.dev/sensors";
+
+void setup() {
+  Serial.begin(115200);
+  delay(2000);
+  
+  Serial.println("=== ESP32 - Conectando ao WiFi ===");
+  WiFi.begin(ssid, password);
+  
+  int tentativas = 0;
+  while (WiFi.status() != WL_CONNECTED && tentativas < 20) {
+    delay(500);
+    Serial.print(".");
+    tentativas++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println();
+    Serial.println("✅ WiFi conectado!");
+    Serial.print("📡 IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println();
+    Serial.println("❌ Falha ao conectar WiFi!");
+  }
+}
+
+void loop() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("❌ WiFi desconectado!");
+    delay(5000);
+    return;
+  }
+
+  Serial.println("\n==================================================");
+  Serial.println("🚀 Enviando dados para API...");
+  
+  // Simulando dados de sensores
+  float temperatura = random(200, 350) / 10.0;
+  float umidade = random(400, 800) / 10.0;
+  
+  // Criando JSON
+  StaticJsonDocument<200> doc;
+  doc["device_id"] = "ESP32_001";
+  doc["temperature"] = temperatura;
+  doc["humidity"] = umidade;
+  
+  String jsonString;
+  serializeJson(doc, jsonString);
+  
+  Serial.println("📦 Dados: " + jsonString);
+  
+  // Cliente HTTPS
+  WiFiClientSecure *client = new WiFiClientSecure;
+  client->setInsecure();
+  
+  HTTPClient http;
+  http.begin(*client, serverUrl);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Accept", "application/json");
+  http.setTimeout(15000);
+  
+  Serial.println("📡 Enviando...");
+  int httpCode = http.POST(jsonString);
+  
+  Serial.println("🔄 Resposta: " + String(httpCode));
+  
+  if (httpCode == 200) {
+    String response = http.getString();
+    Serial.println("✅ SUCESSO!");
+    Serial.println("📨 Resposta: " + response);
+  } else {
+    Serial.println("❌ ERRO: " + String(httpCode));
+  }
+  
+  http.end();
+  delete client;
+  
+  Serial.println("⏰ Aguardando 10 segundos...");
+  Serial.println("==================================================");
+  
+  delay(10000);
+}
