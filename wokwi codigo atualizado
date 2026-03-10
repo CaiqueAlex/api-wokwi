@@ -2,92 +2,258 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <WiFiClientSecure.h>
+#include <DHT.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
 
-// Configurações WiFi
-const char* ssid = "Wokwi-GUEST";
+// ===== CONFIGURAÇÕES =====
+const char* ssid     = "Wokwi-GUEST";
 const char* password = "";
 
-// URL da sua API no Codespace
+// URL do GitHub Codespaces — não muda enquanto o Codespace estiver aberto
+// Formato: https://<CODESPACE_NAME>-8000.app.github.dev/sensors
 const char* serverUrl = "https://sturdy-lamp-4j7rp5qqgr7p3jw9x-8000.app.github.dev/sensors";
 
+// ===== HARDWARE =====
+#define DHT_PIN     4
+#define DHT_TYPE    DHT22
+#define LED_RED     13
+#define LED_GREEN   12
+
+DHT dht(DHT_PIN, DHT_TYPE);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// ===== EDGE COMPUTING LOCAL =====
+#define MAX_BUFFER 5
+float tempBuffer[MAX_BUFFER];
+float umidBuffer[MAX_BUFFER];
+int bufferIndex = 0;
+int bufferCount = 0;
+
+void adicionarAoBuffer(float temp, float umid) {
+  tempBuffer[bufferIndex] = temp;
+  umidBuffer[bufferIndex] = umid;
+  bufferIndex = (bufferIndex + 1) % MAX_BUFFER;
+  if (bufferCount < MAX_BUFFER) bufferCount++;
+}
+
+float calcularMedia(float* buf) {
+  float soma = 0;
+  for (int i = 0; i < bufferCount; i++) soma += buf[i];
+  return bufferCount > 0 ? soma / bufferCount : 0;
+}
+
+float calcularMax(float* buf) {
+  float mx = buf[0];
+  for (int i = 1; i < bufferCount; i++) if (buf[i] > mx) mx = buf[i];
+  return mx;
+}
+
+float calcularMin(float* buf) {
+  float mn = buf[0];
+  for (int i = 1; i < bufferCount; i++) if (buf[i] < mn) mn = buf[i];
+  return mn;
+}
+
+// ===== SETUP =====
 void setup() {
   Serial.begin(115200);
-  delay(2000);
-  
-  Serial.println("=== ESP32 - Conectando ao WiFi ===");
+  delay(1000);
+
+  pinMode(LED_RED,   OUTPUT);
+  pinMode(LED_GREEN, OUTPUT);
+  digitalWrite(LED_RED,   LOW);
+  digitalWrite(LED_GREEN, LOW);
+
+  dht.begin();
+
+  Wire.begin(21, 22);
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("ESP32 IoT v8.0");
+  lcd.setCursor(0, 1);
+  lcd.print("Iniciando...");
+
+  Serial.println("\n========================================");
+  Serial.println("ESP32 IoT v8.0 - Codespaces URL");
+  Serial.println("WiFiClientSecure (SSL real)");
+  Serial.println("Edge Computing ativo");
+  Serial.println("========================================");
+
+  Serial.println("Conectando WiFi...");
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Conectando WiFi");
+
   WiFi.begin(ssid, password);
-  
   int tentativas = 0;
-  while (WiFi.status() != WL_CONNECTED && tentativas < 20) {
+  while (WiFi.status() != WL_CONNECTED && tentativas < 30) {
     delay(500);
     Serial.print(".");
     tentativas++;
   }
-  
+
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println();
-    Serial.println("✅ WiFi conectado!");
-    Serial.print("📡 IP: ");
+    Serial.println("WiFi conectado!");
+    Serial.print("IP: ");
     Serial.println(WiFi.localIP());
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi OK!");
+    lcd.setCursor(0, 1);
+    lcd.print(WiFi.localIP());
+    delay(2000);
   } else {
-    Serial.println();
-    Serial.println("❌ Falha ao conectar WiFi!");
+    Serial.println("\nFalha WiFi!");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi FALHOU!");
   }
 }
 
+// ===== ENVIAR DADOS =====
+bool enviarDados(float temp, float umid, float mediaTemp, float mediaUmid,
+                 float maxTemp, float minTemp, int leituraNum) {
+
+  WiFiClientSecure* client = new WiFiClientSecure;
+  client->setInsecure(); // Sem verificação de certificado (dev)
+
+  HTTPClient http;
+  http.begin(*client, serverUrl);
+  http.addHeader("Content-Type",               "application/json");
+  http.addHeader("Accept",                     "application/json");
+  http.addHeader("ngrok-skip-browser-warning", "1");
+  http.addHeader("User-Agent",                 "ESP32-Arduino/8.0");
+  http.setTimeout(15000);
+
+  StaticJsonDocument<300> doc;
+  doc["device_id"]         = "ESP32_WOKWI";
+  doc["temperature"]       = temp;
+  doc["humidity"]          = umid;
+  doc["media_temperatura"] = round(mediaTemp * 100.0) / 100.0;
+  doc["media_umidade"]     = round(mediaUmid * 100.0) / 100.0;
+  doc["max_temperatura"]   = maxTemp;
+  doc["min_temperatura"]   = minTemp;
+  doc["leitura_num"]       = leituraNum;
+
+  String jsonString;
+  serializeJson(doc, jsonString);
+
+  Serial.println("JSON: " + jsonString);
+  Serial.println("Enviando para Codespaces...");
+
+  int httpCode = http.POST(jsonString);
+
+  Serial.println("HTTP Code: " + String(httpCode));
+
+  bool sucesso = false;
+  if (httpCode == 200 || httpCode == 201) {
+    String response = http.getString();
+    Serial.println("SUCESSO!");
+    Serial.println("Resposta: " + response);
+    sucesso = true;
+  } else if (httpCode > 0) {
+    Serial.println("Erro HTTP: " + String(httpCode));
+    Serial.println("Body: " + http.getString());
+  } else {
+    Serial.println("Erro conexao: " + http.errorToString(httpCode));
+  }
+
+  http.end();
+  delete client;
+  return sucesso;
+}
+
+// ===== ATUALIZAR LCD =====
+void atualizarLCD(float temp, float umid, bool enviado) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  char linha1[17];
+  snprintf(linha1, sizeof(linha1), "T:%.1fC H:%.0f%%", temp, umid);
+  lcd.print(linha1);
+  lcd.setCursor(0, 1);
+  if (enviado) {
+    lcd.print("Enviado OK!     ");
+  } else {
+    lcd.print("Falha Envio!    ");
+  }
+}
+
+// ===== LOOP =====
+int leituraNum = 0;
+
 void loop() {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("❌ WiFi desconectado!");
+    Serial.println("WiFi desconectado! Reconectando...");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Reconectando...");
+    WiFi.reconnect();
     delay(5000);
     return;
   }
 
-  Serial.println("\n==================================================");
-  Serial.println("🚀 Enviando dados para API...");
-  
-  // Simulando dados de sensores
-  float temperatura = random(200, 350) / 10.0;
-  float umidade = random(400, 800) / 10.0;
-  
-  // Criando JSON
-  StaticJsonDocument<200> doc;
-  doc["device_id"] = "ESP32_001";
-  doc["temperature"] = temperatura;
-  doc["humidity"] = umidade;
-  
-  String jsonString;
-  serializeJson(doc, jsonString);
-  
-  Serial.println("📦 Dados: " + jsonString);
-  
-  // Cliente HTTPS
-  WiFiClientSecure *client = new WiFiClientSecure;
-  client->setInsecure();
-  
-  HTTPClient http;
-  http.begin(*client, serverUrl);
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("Accept", "application/json");
-  http.setTimeout(15000);
-  
-  Serial.println("📡 Enviando...");
-  int httpCode = http.POST(jsonString);
-  
-  Serial.println("🔄 Resposta: " + String(httpCode));
-  
-  if (httpCode == 200) {
-    String response = http.getString();
-    Serial.println("✅ SUCESSO!");
-    Serial.println("📨 Resposta: " + response);
-  } else {
-    Serial.println("❌ ERRO: " + String(httpCode));
+  leituraNum++;
+  Serial.println("\n========================================");
+  Serial.println("LEITURA #" + String(leituraNum));
+  Serial.println("========================================");
+
+  float temp = dht.readTemperature();
+  float umid = dht.readHumidity();
+
+  if (isnan(temp) || isnan(umid)) {
+    Serial.println("Falha na leitura do sensor DHT22!");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Sensor Error!");
+    delay(3000);
+    return;
   }
-  
-  http.end();
-  delete client;
-  
-  Serial.println("⏰ Aguardando 10 segundos...");
-  Serial.println("==================================================");
-  
+
+  Serial.println("Temp: " + String(temp) + "C");
+  Serial.println("Umid: " + String(umid) + "%");
+
+  adicionarAoBuffer(temp, umid);
+  float mediaTemp = calcularMedia(tempBuffer);
+  float mediaUmid = calcularMedia(umidBuffer);
+  float maxTemp   = calcularMax(tempBuffer);
+  float minTemp   = calcularMin(tempBuffer);
+
+  Serial.println("[EDGE] Media Temp: " + String(mediaTemp) + "C");
+  Serial.println("[EDGE] Media Umid: " + String(mediaUmid) + "%");
+  Serial.println("[EDGE] Max: " + String(maxTemp) + "C | Min: " + String(minTemp) + "C");
+
+  if (temp > 35.0) {
+    digitalWrite(LED_RED,   HIGH);
+    digitalWrite(LED_GREEN, LOW);
+    Serial.println("ALERTA: Temperatura alta!");
+  } else {
+    digitalWrite(LED_RED,   LOW);
+    digitalWrite(LED_GREEN, HIGH);
+    Serial.println("Temperatura normal");
+  }
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  char linha1[17];
+  snprintf(linha1, sizeof(linha1), "T:%.1fC H:%.1f%%", temp, umid);
+  lcd.print(linha1);
+  lcd.setCursor(0, 1);
+  lcd.print("Enviando...");
+
+  bool enviado = enviarDados(temp, umid, mediaTemp, mediaUmid, maxTemp, minTemp, leituraNum);
+
+  atualizarLCD(temp, umid, enviado);
+
+  if (enviado) {
+    Serial.println("CICLO COMPLETO!");
+  } else {
+    Serial.println("FALHA NO ENVIO!");
+  }
+
+  Serial.println("Aguardando 10 segundos...");
   delay(10000);
 }

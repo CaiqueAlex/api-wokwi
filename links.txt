@@ -1,0 +1,13 @@
+Projeto Wokwi
+
+https://wokwi.com/projects/458064699316672513
+
+dashboard do banco
+
+https://sturdy-lamp-4j7rp5qqgr7p3jw9x-8000.app.github.dev/dashboard
+
+Comandos
+
+pip install -r requirements.txt
+
+python main.py
