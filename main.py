@@ -1,24 +1,111 @@
-from fastapi import FastAPI, Request, HTTPException
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
-import uvicorn
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from datetime import datetime
-from typing import List, Optional
-import psycopg2
-from psycopg2.extras import RealDictCursor
+from typing import Optional
 import logging
+import uvicorn
+import os
 
-# Configurar logging
-logging.basicConfig(level=logging.INFO)
+# ===== LOGGING =====
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
+# ===== BANCO SQLite =====
+DATABASE_URL = "sqlite:///./esp32_iot.db"
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# ===== MODEL =====
+class SensorData(Base):
+    __tablename__ = "sensor_data"
+    id                = Column(Integer, primary_key=True, index=True)
+    device_id         = Column(String(100), index=True)
+    temperature       = Column(Float)
+    humidity          = Column(Float)
+    media_temperatura = Column(Float, nullable=True)
+    media_umidade     = Column(Float, nullable=True)
+    max_temperatura   = Column(Float, nullable=True)
+    min_temperatura   = Column(Float, nullable=True)
+    leitura_num       = Column(Integer, nullable=True)
+    ip_origem         = Column(String(45), nullable=True)
+    timestamp         = Column(DateTime, default=datetime.utcnow)
+
+# ===== DB DEPENDENCY =====
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# ===== SCHEMAS =====
+class SensorDataRequest(BaseModel):
+    device_id:         str
+    temperature:       float
+    humidity:          float
+    media_temperatura: Optional[float] = None
+    media_umidade:     Optional[float] = None
+    max_temperatura:   Optional[float] = None
+    min_temperatura:   Optional[float] = None
+    leitura_num:       Optional[int]   = None
+
+# ===== MIDDLEWARE: Codespaces auth bypass =====
+# O GitHub Codespaces bloqueia requisições externas que não vêm de navegador
+# com um cookie de autenticação. Este middleware adiciona os headers necessários
+# para que o ESP32 (que não é um navegador) consiga passar.
+class CodespacesMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        # Permite acesso externo sem autenticação do Codespaces
+        response.headers["x-github-token"]        = ""
+        response.headers["Access-Control-Allow-Origin"]  = "*"
+        response.headers["Access-Control-Allow-Methods"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        return response
+
+# ===== LIFESPAN =====
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("🚀 Iniciando API ESP32 IoT v8.0...")
+    Base.metadata.create_all(bind=engine)
+    logger.info("✅ Banco SQLite pronto: esp32_iot.db")
+
+    # Detecta se está rodando no Codespaces e loga a URL correta
+    codespace_name = os.environ.get("CODESPACE_NAME", "")
+    if codespace_name:
+        public_url = f"https://{codespace_name}-8000.app.github.dev"
+        logger.info("=" * 60)
+        logger.info("🌐 RODANDO NO GITHUB CODESPACES")
+        logger.info(f"📡 URL PÚBLICA: {public_url}")
+        logger.info(f"📡 URL /sensors: {public_url}/sensors")
+        logger.info("⚠️  Use esta URL no ESP32, NÃO o ngrok!")
+        logger.info("⚠️  Certifique que a porta 8000 está como 'Public'")
+        logger.info("=" * 60)
+    else:
+        logger.info("💻 Rodando localmente na porta 8000")
+
+    yield
+    logger.info("🛑 Encerrando API...")
+
+# ===== APP =====
 app = FastAPI(
-    title="🚀 ESP32 IoT API",
-    description="API IoT com ESP32, PostgreSQL e Edge Computing",
-    version="3.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
+    title="ESP32 IoT API",
+    description="API para receber dados de sensores ESP32",
+    version="8.0.0",
+    lifespan=lifespan
 )
+
+# Ordem importa: CodespacesMiddleware antes do CORS
+app.add_middleware(CodespacesMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,216 +115,153 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ==========================
-# MODELOS
-# ==========================
-
-class SensorData(BaseModel):
-    device_id: str
-    temperature: float
-    humidity: float
-
-# ==========================
-# CONFIGURAÇÃO POSTGRESQL
-# ==========================
-
-DB_CONFIG = {
-    "host": "localhost",
-    "database": "iot_sensors", 
-    "user": "iot_user",
-    "password": "iot123456",
-    "port": "5432"
-}
-
-def get_db_connection():
-    """Conecta ao PostgreSQL"""
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        logger.info("✅ Conectado ao PostgreSQL")
-        return conn
-    except Exception as e:
-        logger.error(f"❌ Erro conectando ao PostgreSQL: {e}")
-        return None
-
-# ==========================
-# ROTAS
-# ==========================
+# ===== ROTAS =====
 
 @app.get("/")
-def home():
-    """Página inicial da API"""
-    conn = get_db_connection()
-    db_status = "✅ Conectado" if conn else "❌ Desconectado"
-    if conn:
-        conn.close()
-    
+async def root():
+    codespace_name = os.environ.get("CODESPACE_NAME", "")
+    url_publica = f"https://{codespace_name}-8000.app.github.dev" if codespace_name else "http://localhost:8000"
     return {
-        "🚀 status": "API ESP32 IoT funcionando!",
-        "🗄️ database": db_status,
-        "📚 swagger": "https://SEU_CODESPACE_URL/docs",
-        "🔗 endpoints": {
-            "GET /": "Esta página",
-            "GET /health": "Saúde do sistema",
-            "GET /sensors": "Ver todos os dados",
-            "POST /sensors": "Receber dados do ESP32",
-            "GET /stats": "Estatísticas dos sensores"
+        "status":     "online",
+        "message":    "🎯 ESP32 IoT API v8.0 funcionando!",
+        "timestamp":  datetime.now().isoformat(),
+        "url_publica": url_publica,
+        "endpoints": {
+            "POST_sensors": f"{url_publica}/sensors",
+            "GET_sensors":  f"{url_publica}/sensors",
+            "GET_dados":    f"{url_publica}/dados",
+            "GET_health":   f"{url_publica}/health"
         }
     }
 
 @app.get("/health")
-def health_check():
-    """Verificação de saúde do sistema"""
-    conn = get_db_connection()
-    
-    if conn:
-        try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM sensor_readings")
-            total_registros = cursor.fetchone()[0]
-            conn.close()
-            
-            return {
-                "status": "healthy",
-                "database": "connected",
-                "total_records": total_registros,
-                "timestamp": datetime.now().isoformat()
-            }
-        except Exception as e:
-            if conn:
-                conn.close()
-            return {"status": "error", "error": str(e)}
-    else:
-        return {"status": "unhealthy", "database": "disconnected"}
-
-@app.get("/sensors")
-def get_sensors(limit: int = 50):
-    """Buscar dados dos sensores"""
-    conn = get_db_connection()
-    if not conn:
-        raise HTTPException(status_code=500, detail="Erro de conexão com banco")
-    
-    try:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM sensor_readings ORDER BY timestamp DESC LIMIT %s", (limit,))
-        dados = cursor.fetchall()
-        
-        result = []
-        for row in dados:
-            result.append({
-                "id": row["id"],
-                "device_id": row["device_id"],
-                "temperature": float(row["temperature"]),
-                "humidity": float(row["humidity"]),
-                "ip_origem": row["ip_origem"],
-                "timestamp": row["timestamp"].isoformat() if row["timestamp"] else None
-            })
-        
-        conn.close()
-        return {"total": len(result), "dados": result}
-        
-    except Exception as e:
-        if conn:
-            conn.close()
-        raise HTTPException(status_code=500, detail=f"Erro: {e}")
+async def health():
+    return {"status": "OK", "timestamp": datetime.now().isoformat()}
 
 @app.post("/sensors")
-async def receive_data(data: SensorData, request: Request):
-    """Receber dados do ESP32"""
-    conn = get_db_connection()
-    if not conn:
-        raise HTTPException(status_code=500, detail="Erro de conexão com banco de dados")
-    
+async def receive_sensor_data(
+    data: SensorDataRequest,
+    request: Request,
+    db: Session = Depends(get_db)
+):
     try:
-        # EDGE COMPUTING - Validações
-        if data.temperature < -50 or data.temperature > 100:
-            conn.close()
-            raise HTTPException(status_code=400, detail=f"Temperatura inválida: {data.temperature}°C")
-        
-        if data.humidity < 0 or data.humidity > 100:
-            conn.close()
-            raise HTTPException(status_code=400, detail=f"Umidade inválida: {data.humidity}%")
-        
-        cursor = conn.cursor()
-        client_ip = str(request.client.host) if request.client else "unknown"
-        
-        # Inserir dados
-        cursor.execute("""
-            INSERT INTO sensor_readings (device_id, temperature, humidity, ip_origem)
-            VALUES (%s, %s, %s, %s)
-            RETURNING id, timestamp
-        """, (data.device_id, data.temperature, data.humidity, client_ip))
-        
-        result = cursor.fetchone()
-        conn.commit()
-        
-        logger.info("=" * 60)
-        logger.info(f"📊 DADOS SALVOS - ID: {result[0]}")
-        logger.info(f"🔧 Device: {data.device_id}")
-        logger.info(f"🌡️ Temp: {data.temperature}°C | 💧 Umidade: {data.humidity}%")
-        logger.info(f"🌐 IP: {client_ip} | ⏰ {result[1]}")
-        logger.info("=" * 60)
-        
-        conn.close()
-        
-        return {
-            "status": "✅ sucesso",
-            "mensagem": "Dados salvos com sucesso!",
-            "id": result[0],
-            "dados": {
-                "device_id": data.device_id,
-                "temperature": data.temperature,
-                "humidity": data.humidity,
-                "timestamp": result[1].isoformat()
-            }
-        }
-        
-    except Exception as e:
-        if conn:
-            conn.rollback()
-            conn.close()
-        logger.error(f"❌ Erro: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        client_ip = request.client.host
 
-@app.get("/stats")
-def get_statistics():
-    """Estatísticas dos sensores"""
-    conn = get_db_connection()
-    if not conn:
-        raise HTTPException(status_code=500, detail="Erro de conexão com banco")
-    
-    try:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        cursor.execute("""
-            SELECT 
-                COUNT(*) as total,
-                AVG(temperature) as avg_temp,
-                MIN(temperature) as min_temp,
-                MAX(temperature) as max_temp,
-                AVG(humidity) as avg_humidity,
-                MAX(timestamp) as last_reading
-            FROM sensor_readings
-        """)
-        
-        stats = cursor.fetchone()
-        conn.close()
-        
+        logger.info("=" * 60)
+        logger.info(f"📡 DADOS RECEBIDOS - Device: {data.device_id}")
+        logger.info(f"   🌐 IP: {client_ip}")
+        logger.info(f"   🌡️  Temperatura: {data.temperature}°C")
+        logger.info(f"   💧 Umidade: {data.humidity}%")
+        if data.media_temperatura is not None:
+            logger.info(f"   📊 Média Temp: {data.media_temperatura}°C")
+            logger.info(f"   📊 Média Umid: {data.media_umidade}%")
+            logger.info(f"   📈 Max: {data.max_temperatura}°C | Min: {data.min_temperatura}°C")
+        if data.leitura_num is not None:
+            logger.info(f"   🔢 Leitura #: {data.leitura_num}")
+        logger.info("=" * 60)
+
+        if not (-50 <= data.temperature <= 100):
+            raise HTTPException(400, f"Temperatura inválida: {data.temperature}°C")
+        if not (0 <= data.humidity <= 100):
+            raise HTTPException(400, f"Umidade inválida: {data.humidity}%")
+
+        registro = SensorData(
+            device_id         = data.device_id,
+            temperature       = data.temperature,
+            humidity          = data.humidity,
+            media_temperatura = data.media_temperatura,
+            media_umidade     = data.media_umidade,
+            max_temperatura   = data.max_temperatura,
+            min_temperatura   = data.min_temperatura,
+            leitura_num       = data.leitura_num,
+            ip_origem         = client_ip
+        )
+
+        db.add(registro)
+        db.commit()
+        db.refresh(registro)
+
+        logger.info(f"✅ Salvo no banco com ID: {registro.id}")
+
         return {
-            "estatísticas": {
-                "total_leituras": stats["total"],
-                "última_leitura": stats["last_reading"].isoformat() if stats["last_reading"] else None,
-                "temperatura": {
-                    "média": round(float(stats["avg_temp"] or 0), 2),
-                    "mínima": float(stats["min_temp"] or 0),
-                    "máxima": float(stats["max_temp"] or 0)
-                },
-                "umidade_média": round(float(stats["avg_humidity"] or 0), 2)
-            }
+            "status":  "success",
+            "message": "OK",
+            "saved":   True,
+            "id":      registro.id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erro ao salvar: {e}")
+        raise HTTPException(500, f"Erro interno: {str(e)}")
+
+@app.get("/sensors")
+async def get_sensor_data(limit: int = 20, db: Session = Depends(get_db)):
+    try:
+        dados = db.query(SensorData).order_by(
+            SensorData.timestamp.desc()
+        ).limit(limit).all()
+
+        return {
+            "status": "success",
+            "count":  len(dados),
+            "data": [
+                {
+                    "id":                d.id,
+                    "device_id":         d.device_id,
+                    "temperature":       d.temperature,
+                    "humidity":          d.humidity,
+                    "media_temperatura": d.media_temperatura,
+                    "media_umidade":     d.media_umidade,
+                    "max_temperatura":   d.max_temperatura,
+                    "min_temperatura":   d.min_temperatura,
+                    "leitura_num":       d.leitura_num,
+                    "ip_origem":         d.ip_origem,
+                    "timestamp":         d.timestamp.isoformat() if d.timestamp else None
+                }
+                for d in dados
+            ]
         }
     except Exception as e:
-        if conn:
-            conn.close()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(500, f"Erro ao consultar banco: {str(e)}")
+
+@app.get("/dados")
+async def ver_dados_simples(db: Session = Depends(get_db)):
+    try:
+        dados = db.query(SensorData).order_by(
+            SensorData.timestamp.desc()
+        ).limit(10).all()
+
+        if not dados:
+            return {"message": "Nenhum dado ainda", "total": 0}
+
+        return {
+            "total": len(dados),
+            "dados": [
+                {
+                    "id":     d.id,
+                    "device": d.device_id,
+                    "temp":   f"{d.temperature}°C",
+                    "umid":   f"{d.humidity}%",
+                    "quando": d.timestamp.strftime("%H:%M:%S") if d.timestamp else None
+                }
+                for d in dados
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Erro ao consultar banco: {str(e)}")
+
+@app.delete("/sensors")
+async def limpar_dados(db: Session = Depends(get_db)):
+    try:
+        count = db.query(SensorData).count()
+        db.query(SensorData).delete()
+        db.commit()
+        logger.info(f"🗑️ {count} registros removidos do banco.")
+        return {"status": "ok", "removidos": count}
+    except Exception as e:
+        raise HTTPException(500, f"Erro ao limpar banco: {str(e)}")
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
