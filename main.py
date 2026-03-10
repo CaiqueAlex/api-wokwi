@@ -12,20 +12,19 @@ import logging
 import uvicorn
 import os
 
-# ===== LOGGING =====
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# ===== BANCO SQLite =====
+# Banco SQLite
 DATABASE_URL = "sqlite:///./esp32_iot.db"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# ===== MODEL =====
+# modelos / tabelas do banco
 class SensorData(Base):
     __tablename__ = "sensor_data"
     id                = Column(Integer, primary_key=True, index=True)
@@ -40,7 +39,7 @@ class SensorData(Base):
     ip_origem         = Column(String(45), nullable=True)
     timestamp         = Column(DateTime, default=datetime.utcnow)
 
-# ===== DB DEPENDENCY =====
+# Dependencias do banco de dados
 def get_db():
     db = SessionLocal()
     try:
@@ -48,7 +47,7 @@ def get_db():
     finally:
         db.close()
 
-# ===== SCHEMAS =====
+# schemaas
 class SensorDataRequest(BaseModel):
     device_id:         str
     temperature:       float
@@ -59,7 +58,6 @@ class SensorDataRequest(BaseModel):
     min_temperatura:   Optional[float] = None
     leitura_num:       Optional[int]   = None
 
-# ===== MIDDLEWARE =====
 class CodespacesMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
@@ -69,10 +67,10 @@ class CodespacesMiddleware(BaseHTTPMiddleware):
         response.headers["Access-Control-Allow-Headers"] = "*"
         return response
 
-# ===== LIFESPAN =====
+# textin de incio
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("🚀 Iniciando API ESP32 IoT v8.0...")
+    logger.info("🚀 Iniciando API ESP32 IoT v2.0...")
     Base.metadata.create_all(bind=engine)
     logger.info("✅ Banco SQLite pronto: esp32_iot.db")
 
@@ -84,8 +82,7 @@ async def lifespan(app: FastAPI):
         logger.info(f"📡 URL PÚBLICA: {public_url}")
         logger.info(f"📡 URL /sensors:   {public_url}/sensors")
         logger.info(f"📡 URL /dashboard: {public_url}/dashboard")
-        logger.info("⚠️  Use esta URL no ESP32, NÃO o ngrok!")
-        logger.info("⚠️  Certifique que a porta 8000 está como 'Public'")
+        logger.info("⚠️ Deixa a porta como publico zé ruela")
         logger.info("=" * 60)
     else:
         logger.info("💻 Rodando localmente na porta 8000")
@@ -93,11 +90,11 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("🛑 Encerrando API...")
 
-# ===== APP =====
+# app
 app = FastAPI(
     title="ESP32 IoT API",
     description="API para receber dados de sensores ESP32",
-    version="8.0.0",
+    version="2.0.0",
     lifespan=lifespan
 )
 
@@ -110,7 +107,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ===== ROTAS =====
+# rotas / retorna a lista de endpoints disponivel
+# confirma se a api ta on
 
 @app.get("/")
 async def root():
@@ -118,7 +116,7 @@ async def root():
     url_publica = f"https://{codespace_name}-8000.app.github.dev" if codespace_name else "http://localhost:8000"
     return {
         "status":    "online",
-        "message":   "🎯 ESP32 IoT API v8.0 funcionando!",
+        "message":   "🎯 ESP32 IoT API v2.0 funcionando!",
         "timestamp": datetime.now().isoformat(),
         "endpoints": {
             "POST /sensors":  f"{url_publica}/sensors",
@@ -129,9 +127,12 @@ async def root():
         }
     }
 
+
 @app.get("/health")
 async def health():
     return {"status": "OK", "timestamp": datetime.now().isoformat()}
+
+# aqui recebe o post do esp a cada 10 segundos
 
 @app.post("/sensors")
 async def receive_sensor_data(
@@ -213,6 +214,8 @@ async def get_sensor_data(limit: int = 20, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(500, f"Erro ao consultar banco: {str(e)}")
 
+
+
 @app.get("/dados")
 async def ver_dados_simples(db: Session = Depends(get_db)):
     try:
@@ -246,7 +249,7 @@ async def limpar_dados(db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(500, f"Erro ao limpar banco: {str(e)}")
 
-# ===== DASHBOARD =====
+# dashboard só para mostrar para a sala + html usando f-string pra mostrar
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(db: Session = Depends(get_db)):
